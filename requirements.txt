@@ -1,1 +1,8 @@
-
+torch>=2.0.0
+transformers>=4.35.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+shap>=0.42.0
+pandas>=2.0.0
+git+https://github.com/crewaiinc/crewai.git@v0.32.0
