@@ -34,6 +34,10 @@ print(f"Attribution: Alice={scores[0]:.2f}, Bob={scores[1]:.2f}")
 
 - python experiments/run_baseline.py – baseline attribution
 - python experiments/run_dropout_test.py – stability under agent dropout
+- python experiments/run_stability_noise.py – stability under input noise
+- python experiments/run_benchmark_overcooked.py – Overcooked‑AI cooperative task
+- python experiments/run_benchmark_math.py – GSM8K math reasoning
+- python experiments/run_benchmark_negotiation.py – Craigslist Bargaining negotiation
 
 # License
 
