@@ -101,12 +101,16 @@ def leave_one_out_attribution_overcooked(agent_a, agent_b, env_wrapper):
 def main():
     model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
     layout = create_overcooked_layout("cramped_room")
-    env = OvercookedWrapper(layout)
-    agent_a = OvercookedAgent("ChefA", model_name=model_name)
-    agent_b = OvercookedAgent("ChefB", model_name=model_name)
-    print("Running Overcooked episode and computing attribution (this may take a while)...")
-    attr_a, attr_b = leave_one_out_attribution_overcooked(agent_a, agent_b, env)
-    print(f"Overcooked attribution: ChefA = {attr_a:.2f}, ChefB = {attr_b:.2f}")
+    all_attr_a, all_attr_b = [], []
+    for ep in range(50):
+        env = OvercookedWrapper(layout)
+        agent_a = OvercookedAgent("ChefA", model_name=model_name)
+        agent_b = OvercookedAgent("ChefB", model_name=model_name)
+        attr_a, attr_b = leave_one_out_attribution_overcooked(agent_a, agent_b, env)
+        all_attr_a.append(attr_a)
+        all_attr_b.append(attr_b)
+        print(f"Episode {ep+1}: ChefA={attr_a:.2f}, ChefB={attr_b:.2f}")
+    print(f"\nMean attribution over 50 episodes: ChefA={np.mean(all_attr_a):.2f}, ChefB={np.mean(all_attr_b):.2f}")
 
 if __name__ == "__main__":
     main()
