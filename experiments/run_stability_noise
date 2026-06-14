@@ -2,13 +2,14 @@
 """
 Test attribution stability under input noise (reworded prompts, paraphrasing, typos).
 
-Measures how much attribution scores (e.g., perturbation, Shapley, or TracIn) change
-when the same question is asked in different ways or with small perturbations.
-Outputs variance, rank stability, and a stability score (1 - normalized variance).
+Measures how much attribution scores (perturbation, Shapley) change when the same
+question is asked in different ways. Outputs variance, rank stability, and a
+stability score (1 - normalized variance). This script is self‑contained and
+recomputes attribution after each noise sample.
 
 Env vars:
   MODEL_NAME   default Qwen/Qwen2.5-3B-Instruct
-  ATTRIB_METHOD  perturbation | shapley | tracin   (default perturbation)
+  ATTRIB_METHOD  perturbation | shapley   (default perturbation)
   N_NOISE       number of noise samples per seed (default 10)
   SEEDS         number of random seeds (default 5)
   PROMPT_ORIG   original prompt (default: "Should we increase AI safety funding? Answer in one sentence.")
@@ -18,14 +19,12 @@ import sys
 import random
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.append(".")
 from src.agents.dialogue_agent import DialogueAgent
 from src.environment.two_agent_dialogue import TwoAgentEnv
 from src.attribution.perturbation import perturbation_attribution
 from src.attribution.shapley_approx import exact_shapley_2_agents
-from src.attribution.tracin import per_example_param_grad, tracin_matrices
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
 ATTRIB_METHOD = os.environ.get("ATTRIB_METHOD", "perturbation")
@@ -43,8 +42,7 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 def rephrase_prompt(prompt, rng):
-    """Generate a paraphrased version with random typos or synonym swaps."""
-    # Simple perturbation: add/remove punctuation, swap common words
+    """Generate a paraphrased version with random synonyms or small typos."""
     variants = [
         prompt.replace("?", "?").lower(),
         prompt.replace("Should", "Is it advisable to"),
@@ -53,8 +51,8 @@ def rephrase_prompt(prompt, rng):
         prompt.replace("Answer in one sentence.", "Respond with one sentence."),
         prompt.replace("?", "? " + rng.choice(["Please", "Kindly", ""])),
     ]
-    # add random typo: flip a character
-    if rng.random() < 0.3:
+    # Add random character flip (typo)
+    if rng.random() < 0.3 and len(prompt) > 0:
         idx = rng.randint(0, len(prompt)-1)
         noisy = list(prompt)
         noisy[idx] = rng.choice("abcdefghijklmnopqrstuvwxyz")
@@ -62,24 +60,20 @@ def rephrase_prompt(prompt, rng):
     return rng.choice(variants)
 
 def run_attribution(agent_a, agent_b, env, prompt, method):
+    """Run one dialogue and return attribution scores for both agents."""
     env.reset()
     env.step(prompt)
     _, ra, rb = env.get_last_exchange()
+    def length_outcome(responses):
+        return len(responses[0]) + len(responses[1])
     if method == "perturbation":
-        def length_outcome(responses): return len(responses[0]) + len(responses[1])
         a = perturbation_attribution(ra, rb, length_outcome, agent_idx=0, baseline_value="")
         b = perturbation_attribution(ra, rb, length_outcome, agent_idx=1, baseline_value="")
         return np.array([a, b])
     elif method == "shapley":
-        def length_outcome(responses): return len(responses[0]) + len(responses[1])
         return exact_shapley_2_agents([ra, rb], length_outcome, baseline="")
     else:
-        # TracIn on the last turn (Bob's response)
-        # Need white-box agents; fallback to simple dummy
-        # Here we approximate: use last-turn gradient influence on total length
-        # For simplicity, return difference of lengths (same as perturbation)
-        # Full TracIn would require gradient on model, which is heavy.
-        return np.array([len(ra), len(rb)])
+        raise ValueError(f"Unknown method: {method}")
 
 def main():
     print(f"Stability test: method={ATTRIB_METHOD}, N_NOISE={N_NOISE}, SEEDS={SEEDS}")
@@ -87,7 +81,7 @@ def main():
     for seed in range(SEEDS):
         set_seed(seed)
         rng = random.Random(seed)
-        # Load fresh agents each seed to avoid state
+        # Fresh agents each seed
         agent_a = DialogueAgent("Alice", model_name=MODEL_NAME)
         agent_b = DialogueAgent("Bob", model_name=MODEL_NAME)
         env = TwoAgentEnv(agent_a, agent_b)
@@ -97,21 +91,19 @@ def main():
         perturbed_scores = []
         for _ in range(N_NOISE):
             noisy_prompt = rephrase_prompt(PROMPT_ORIG, rng)
-            # Reload fresh environment to avoid history contamination
             agent_a2 = DialogueAgent("Alice", model_name=MODEL_NAME)
             agent_b2 = DialogueAgent("Bob", model_name=MODEL_NAME)
             env2 = TwoAgentEnv(agent_a2, agent_b2)
             scores = run_attribution(agent_a2, agent_b2, env2, noisy_prompt, ATTRIB_METHOD)
             perturbed_scores.append(scores)
         perturbed_scores = np.array(perturbed_scores)
-        # Stability: 1 - normalized variance across noise samples
         variance = np.var(perturbed_scores, axis=0).mean()
         max_var = np.var(orig_scores) if np.var(orig_scores) > 1e-6 else 1.0
         stability = 1.0 - min(1.0, variance / max_var)
         all_stability_scores.append(stability)
         print(f"Seed {seed}: orig={orig_scores}, stability={stability:.3f}")
-    overall_stability = np.mean(all_stability_scores)
-    print(f"\nOverall stability score (higher = more stable): {overall_stability:.4f}")
+    overall = np.mean(all_stability_scores)
+    print(f"\nOverall stability score (higher = more stable): {overall:.4f}")
 
 if __name__ == "__main__":
     main()
