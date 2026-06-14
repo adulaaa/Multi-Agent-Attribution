@@ -10,8 +10,8 @@ recomputes attribution after each noise sample.
 Env vars:
   MODEL_NAME   default Qwen/Qwen2.5-3B-Instruct
   ATTRIB_METHOD  perturbation | shapley   (default perturbation)
-  N_NOISE       number of noise samples per seed (default 10)
-  SEEDS         number of random seeds (default 5)
+  N_NOISE       number of noise samples per seed (default 50)
+  SEEDS         number of random seeds (default 10)
   PROMPT_ORIG   original prompt (default: "Should we increase AI safety funding? Answer in one sentence.")
 """
 import os
@@ -28,8 +28,8 @@ from src.attribution.shapley_approx import exact_shapley_2_agents
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
 ATTRIB_METHOD = os.environ.get("ATTRIB_METHOD", "perturbation")
-N_NOISE = int(os.environ.get("N_NOISE", "10"))
-SEEDS = int(os.environ.get("SEEDS", "5"))
+N_NOISE = int(os.environ.get("N_NOISE", "50"))
+SEEDS = int(os.environ.get("SEEDS", "10"))
 PROMPT_ORIG = os.environ.get("PROMPT_ORIG", "Should we increase AI safety funding? Answer in one sentence.")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
