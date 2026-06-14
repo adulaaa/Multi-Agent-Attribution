@@ -46,7 +46,7 @@ def main():
     model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
     dataset = load_dataset("craigslist_bargaining", split="train")
     # Use a few examples
-    examples = [dataset[i] for i in range(3)]
+    examples = [dataset[i] for i in range(100)]
     buyer = DialogueAgent("Buyer", model_name=model_name)
     seller = DialogueAgent("Seller", model_name=model_name)
 
