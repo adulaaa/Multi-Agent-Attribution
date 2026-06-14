@@ -44,7 +44,7 @@ def main():
     model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
     dataset = load_dataset("gsm8k", "main", split="train")
     # Use a small subset for demonstration (change as needed)
-    indices = [0, 1, 2, 3, 4]
+    indices = list(range(100))
     problems = [dataset[i]["question"] for i in indices]
     agent_solver = DialogueAgent("Solver", model_name=model_name)
     agent_verifier = DialogueAgent("Verifier", model_name=model_name)
