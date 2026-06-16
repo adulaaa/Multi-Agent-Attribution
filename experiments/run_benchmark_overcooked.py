@@ -4,15 +4,21 @@ Overcooked‑AI integration – cooperative task attribution.
 Loads the actual Overcooked environment, drives two LLM agents,
 and recomputes episode reward after ablating each agent to get attribution.
 Requires `overcooked-ai` package.
+Computes LOO, perturbation, and exact Shapley for each episode.
 """
+
 
 import os
 import sys
 import numpy as np
 import torch
+from datasets import load_dataset  
 
 sys.path.append(".")
 from src.agents.dialogue_agent import DialogueAgent
+from src.attribution.removal_based import leave_one_out_attribution
+from src.attribution.perturbation import perturbation_attribution
+from src.attribution.shapley_approx import exact_shapley_2_agents
 
 try:
     from overcooked_ai import OvercookedEnv
@@ -21,11 +27,9 @@ except ImportError:
     raise ImportError("Please install overcooked-ai: pip install overcooked-ai")
 
 def create_overcooked_layout(layout_name="cramped_room"):
-    """Create standard Overcooked gridworld."""
     return OvercookedGridworld.from_layout_name(layout_name)
 
 class OvercookedWrapper:
-    """Wrap Overcooked to expose a text‑based API for LLM agents."""
     def __init__(self, layout):
         self.env = OvercookedEnv.from_gridworld(layout)
         self.step_count = 0
@@ -37,7 +41,6 @@ class OvercookedWrapper:
         return self._state_text()
 
     def step(self, action_a_str, action_b_str):
-        """Map agent strings to action indices and step environment."""
         action_a = self._parse_action(action_a_str)
         action_b = self._parse_action(action_b_str)
         state, reward, done, _ = self.env.step([action_a, action_b])
@@ -46,7 +49,6 @@ class OvercookedWrapper:
         return self._state_text(), reward, done
 
     def _parse_action(self, text):
-        """Convert natural language action to Overcooked action index."""
         text = text.lower()
         if "up" in text:
             return 1
@@ -58,21 +60,17 @@ class OvercookedWrapper:
             return 4
         elif "interact" in text:
             return 5
-        return 0  # stay
+        return 0
 
     def _state_text(self):
-        """Return human‑readable state description."""
-        # Use environment's built‑in string representation
         return str(self.env.state)
 
 class OvercookedAgent(DialogueAgent):
-    """Agent that outputs Overcooked actions."""
     def respond(self, message):
         system = "You are playing Overcooked. Output one action: MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT, INTERACT, or STAY."
         return super().respond(system + "\n" + message)
 
 def run_episode(agent_a, agent_b, env_wrapper):
-    """Run a full episode and return total reward."""
     state = env_wrapper.reset()
     total_reward = 0.0
     done = False
@@ -83,34 +81,92 @@ def run_episode(agent_a, agent_b, env_wrapper):
         total_reward += reward
     return total_reward
 
-def leave_one_out_attribution_overcooked(agent_a, agent_b, env_wrapper):
-    """Compute LOO attribution by re‑running episodes."""
-    original_reward = run_episode(agent_a, agent_b, env_wrapper)
-    # Ablate agent A
+def outcome_from_responses(responses, env_wrapper, agent_a, agent_b):
+    """
+    Given two action strings [action_a, action_b], simulate the episode with these fixed actions
+    (but actually we need to use them as the first actions and then continue normally).
+    Simplified: we just return the total reward of the episode starting with those actions.
+    """
+    # We'll create a new environment and use the given actions as first step.
+    env = OvercookedWrapper(env_wrapper.env.gridworld)  # recreate
+    state = env.reset()
+    # Use the provided actions
+    state, reward, done = env.step(responses[0], responses[1])
+    total = reward
+    # Continue the episode with the original agents' responses
+    agent_a_copy = OvercookedAgent("A", model_name=agent_a.model_name)
+    agent_b_copy = OvercookedAgent("B", model_name=agent_b.model_name)
+    while not done:
+        action_a = agent_a_copy.respond(state)
+        action_b = agent_b_copy.respond(state)
+        state, reward, done = env.step(action_a, action_b)
+        total += reward
+    return total
+
+def compute_attributions(env_wrapper, agent_a, agent_b):
+    """
+    Compute LOO, perturbation, and exact Shapley for one episode.
+    """
+    # Original reward
+    orig_reward = run_episode(agent_a, agent_b, env_wrapper)
+
+    # LOO
     orig_respond_a = agent_a.respond
     agent_a.respond = lambda _: "STAY"
-    reward_without_a = run_episode(agent_a, agent_b, env_wrapper)
+    reward_no_a = run_episode(agent_a, agent_b, env_wrapper)
     agent_a.respond = orig_respond_a
-    # Ablate agent B
+
     orig_respond_b = agent_b.respond
     agent_b.respond = lambda _: "STAY"
-    reward_without_b = run_episode(agent_a, agent_b, env_wrapper)
+    reward_no_b = run_episode(agent_a, agent_b, env_wrapper)
     agent_b.respond = orig_respond_b
-    return original_reward - reward_without_a, original_reward - reward_without_b
+
+    loo_a = orig_reward - reward_no_a
+    loo_b = orig_reward - reward_no_b
+
+    # Perturbation and Shapley: we need the first actions from each agent
+    state = env_wrapper.reset()
+    action_a = agent_a.respond(state)
+    action_b = agent_b.respond(state)
+    def outcome_pair(responses):
+        # For exact Shapley, we need to evaluate all subsets; we'll use the outcome_from_responses function
+        return outcome_from_responses(responses, env_wrapper, agent_a, agent_b)
+
+    pert_a = perturbation_attribution(action_a, action_b, outcome_pair, agent_idx=0, baseline_value="STAY")
+    pert_b = perturbation_attribution(action_a, action_b, outcome_pair, agent_idx=1, baseline_value="STAY")
+    shap_scores = exact_shapley_2_agents([action_a, action_b], outcome_pair, baseline="STAY")
+
+    return {
+        "LOO": (loo_a, loo_b),
+        "Perturbation": (pert_a, pert_b),
+        "Exact Shapley": (shap_scores[0], shap_scores[1])
+    }
 
 def main():
     model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
     layout = create_overcooked_layout("cramped_room")
-    all_attr_a, all_attr_b = [], []
-    for ep in range(50):
+    episodes = 50
+
+    all_loo_a = []; all_loo_b = []
+    all_pert_a = []; all_pert_b = []
+    all_shap_a = []; all_shap_b = []
+
+    for ep in range(episodes):
         env = OvercookedWrapper(layout)
         agent_a = OvercookedAgent("ChefA", model_name=model_name)
         agent_b = OvercookedAgent("ChefB", model_name=model_name)
-        attr_a, attr_b = leave_one_out_attribution_overcooked(agent_a, agent_b, env)
-        all_attr_a.append(attr_a)
-        all_attr_b.append(attr_b)
-        print(f"Episode {ep+1}: ChefA={attr_a:.2f}, ChefB={attr_b:.2f}")
-    print(f"\nMean attribution over 50 episodes: ChefA={np.mean(all_attr_a):.2f}, ChefB={np.mean(all_attr_b):.2f}")
+        attrs = compute_attributions(env, agent_a, agent_b)
+        all_loo_a.append(attrs["LOO"][0]); all_loo_b.append(attrs["LOO"][1])
+        all_pert_a.append(attrs["Perturbation"][0]); all_pert_b.append(attrs["Perturbation"][1])
+        all_shap_a.append(attrs["Exact Shapley"][0]); all_shap_b.append(attrs["Exact Shapley"][1])
+        if (ep+1) % 10 == 0:
+            print(f"Processed {ep+1} episodes.")
+
+    print("\n=== Overcooked Attribution Summary (50 episodes) ===")
+    print(f"Method            ChefA      ChefB")
+    print(f"LOO               {np.mean(all_loo_a):.4f}    {np.mean(all_loo_b):.4f}")
+    print(f"Perturbation      {np.mean(all_pert_a):.4f}    {np.mean(all_pert_b):.4f}")
+    print(f"Exact Shapley     {np.mean(all_shap_a):.4f}    {np.mean(all_shap_b):.4f}")
 
 if __name__ == "__main__":
     main()
