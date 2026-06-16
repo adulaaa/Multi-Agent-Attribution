@@ -1,10 +1,8 @@
-
 #!/usr/bin/env python3
 """
 GSM8K math reasoning – two agents: Solver and Verifier.
-Computes LOO, perturbation, and exact Shapley using the verifier's judgment as outcome.
+Computes LOO, perturbation, and exact Shapley attribution.
 """
-
 import os
 import sys
 import numpy as np
@@ -16,73 +14,83 @@ from src.attribution.removal_based import leave_one_out_attribution
 from src.attribution.perturbation import perturbation_attribution
 from src.attribution.shapley_approx import exact_shapley_2_agents
 
-def get_solver_answer(problem, solver):
-    solver_prompt = f"Solve this math problem step by step and output only the final number:\n{problem}"
-    return solver.respond(solver_prompt)
 
-def get_verifier_judgment(problem, solver_answer, verifier):
-    verifier_prompt = (
+def get_solver_answer(problem, solver):
+    prompt = f"Solve this math problem step by step and output only the final number:\n{problem}"
+    return solver.respond(prompt)
+
+
+def get_verifier_text(problem, solver_answer, verifier):
+    prompt = (
         f"The problem was:\n{problem}\n"
         f"An agent gave this solution:\n{solver_answer}\n"
         f"Is the final answer correct? Answer only YES or NO."
     )
-    verifier_answer = verifier.respond(verifier_prompt)
-    return 1 if "yes" in verifier_answer.lower() else 0
+    return verifier.respond(prompt)
+
 
 def outcome_from_responses(responses):
-    """
-    responses = [solver_response, verifier_response]
-    Outcome is the verifier's judgment (1 if YES, 0 otherwise).
-    If verifier_response is empty, we treat it as NO (0).
-    """
-    verifier_response = responses[1]
-    if verifier_response == "":
+    """responses = [solver_text, verifier_text] -> 1 if verifier says YES, else 0."""
+    if not responses[1]:
         return 0
-    return 1 if "yes" in verifier_response.lower() else 0
+    return 1 if "yes" in responses[1].lower() else 0
+
 
 def compute_attributions(problem, solver, verifier):
-    # Original correctness: solver answer + verifier judgment
-    solver_answer = get_solver_answer(problem, solver)
-    original_correct = get_verifier_judgment(problem, solver_answer, verifier)
+    # --- Original outcome (clean run) ---
+    solver_resp = get_solver_answer(problem, solver)
+    verifier_resp = get_verifier_text(problem, solver_resp, verifier)
+    original_correct = outcome_from_responses([solver_resp, verifier_resp])
 
-    # LOO: ablate solver or verifier and recompute correctness
-    orig_solver_respond = solver.respond
+    # --- LOO for solver ---
+    solver.reset()
+    verifier.reset()
+    orig_s = solver.respond
     solver.respond = lambda _: ""
-    solver_answer_empty = get_solver_answer(problem, solver)
-    correct_no_solver = get_verifier_judgment(problem, solver_answer_empty, verifier)
-    solver.respond = orig_solver_respond
-
-    orig_verifier_respond = verifier.respond
-    verifier.respond = lambda _: "YES"  
-    correct_no_verifier = get_verifier_judgment(problem, solver_answer, verifier)
-    verifier.respond = orig_verifier_respond
-
+    solver_empty = get_solver_answer(problem, solver)
+    verifier_empty = get_verifier_text(problem, solver_empty, verifier)
+    correct_no_solver = outcome_from_responses([solver_empty, verifier_empty])
+    solver.respond = orig_s
     loo_solver = original_correct - correct_no_solver
+
+    # --- LOO for verifier ---
+    solver.reset()
+    verifier.reset()
+    orig_v = verifier.respond
+    verifier.respond = lambda _: "YES"
+    solver_resp2 = get_solver_answer(problem, solver)
+    verifier_yes = get_verifier_text(problem, solver_resp2, verifier)
+    correct_no_verifier = outcome_from_responses([solver_resp2, verifier_yes])
+    verifier.respond = orig_v
     loo_verifier = original_correct - correct_no_verifier
 
-    # For perturbation and Shapley, we need actual responses from both agents
-    solver_resp = get_solver_answer(problem, solver)
-    verifier_resp = get_verifier_judgment(problem, solver_resp, verifier)  # returns 0/1
-    verifier_prompt = (
-        f"The problem was:\n{problem}\n"
-        f"An agent gave this solution:\n{solver_resp}\n"
-        f"Is the final answer correct? Answer only YES or NO."
-    )
-    verifier_text = verifier.respond(verifier_prompt)
+    # --- Fresh clean run for perturbation and Shapley ---
+    solver.reset()
+    verifier.reset()
+    solver_resp_clean = get_solver_answer(problem, solver)
+    verifier_resp_clean = get_verifier_text(problem, solver_resp_clean, verifier)
 
-    # Outcome function for perturbation and Shapley: uses both responses
     def outcome_fn(resp_pair):
-        # resp_pair = [solver_text, verifier_text]
-        return outcome_from_responses(resp_pair)
+        # Re-evaluate correctness using the given solver and verifier texts.
+        #Fresh verifier to avoid history contamination.
+        temp_verifier = DialogueAgent("TempVerifier", model_name=verifier.model_name)
+        temp_verifier.reset()
+        prompt = (
+            f"The problem was:\n{problem}\n"
+            f"An agent gave this solution:\n{resp_pair[0]}\n"
+            f"Is the final answer correct? Answer only YES or NO."
+        )
+        temp_response = temp_verifier.respond(prompt)
+        return 1 if "yes" in temp_response.lower() else 0
 
     pert_solver = perturbation_attribution(
-        solver_resp, verifier_text, outcome_fn, agent_idx=0, baseline_value=""
+        solver_resp_clean, verifier_resp_clean, outcome_fn, agent_idx=0, baseline_value=""
     )
     pert_verifier = perturbation_attribution(
-        solver_resp, verifier_text, outcome_fn, agent_idx=1, baseline_value=""
+        solver_resp_clean, verifier_resp_clean, outcome_fn, agent_idx=1, baseline_value=""
     )
     shapley_scores = exact_shapley_2_agents(
-        [solver_resp, verifier_text], outcome_fn, baseline=""
+        [solver_resp_clean, verifier_resp_clean], outcome_fn, baseline=""
     )
 
     return {
@@ -90,6 +98,7 @@ def compute_attributions(problem, solver, verifier):
         "Perturbation": (pert_solver, pert_verifier),
         "Exact Shapley": (shapley_scores[0], shapley_scores[1])
     }
+
 
 def main():
     model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
@@ -116,6 +125,7 @@ def main():
     print(f"LOO               {np.mean(loo_s):.4f}    {np.mean(loo_v):.4f}")
     print(f"Perturbation      {np.mean(pert_s):.4f}    {np.mean(pert_v):.4f}")
     print(f"Exact Shapley     {np.mean(shap_s):.4f}    {np.mean(shap_v):.4f}")
+
 
 if __name__ == "__main__":
     main()
