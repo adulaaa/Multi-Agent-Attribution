@@ -33,8 +33,8 @@ def outcome_from_responses(responses, item_title, item_desc, start_price):
     Given [buyer_resp, seller_resp], simulate negotiation with these as the only messages.
     """
     # We treat buyer_resp as the offer, seller_resp as final price.
-    # But to be consistent, we need to re-run the negotiation with these exact responses.
-    # This is simplified: we assume seller_resp contains the final price.
+    # For consistency, we need to re-run the negotiation with these exact responses.
+    # Simplified: we assume seller_resp contains the final price.
     match = re.search(r"\$?(\d+(?:\.\d{1,2})?)", responses[1])
     return float(match.group(1)) if match else 0.0
 
