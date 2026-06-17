@@ -29,7 +29,7 @@ model = AutoModelForCausalLM.from_pretrained(
 ).to(DEVICE)
 model.eval()
 
-# --- Shared agent class (no per‑instance model loading) ---
+# --- Shared agent class ---
 class SharedDialogueAgent:
     def __init__(self, name):
         self.name = name
@@ -67,6 +67,7 @@ def get_verifier_text(problem, solver_answer, verifier):
     return verifier.respond(prompt)
 
 def outcome_from_responses(responses):
+    # Directly use the Verifier's text
     if not responses[1]:
         return 0
     return 1 if "yes" in responses[1].lower() else 0
@@ -88,7 +89,7 @@ def compute_attributions(problem, solver, verifier):
     solver.respond = orig_s
     loo_solver = original_correct - correct_no_solver
 
-    # LOO for verifier (ablate with empty string)
+    # LOO for verifier
     solver.reset()
     verifier.reset()
     orig_v = verifier.respond
@@ -99,23 +100,15 @@ def compute_attributions(problem, solver, verifier):
     verifier.respond = orig_v
     loo_verifier = original_correct - correct_no_verifier
 
-    # Perturbation and Shapley on clean responses
+    # Perturbation and Shapley: use the actual recorded responses
     solver.reset()
     verifier.reset()
     solver_resp_clean = get_solver_answer(problem, solver)
     verifier_resp_clean = get_verifier_text(problem, solver_resp_clean, verifier)
 
+    # Outcome function uses the Verifier's actual text (no fresh verifier)
     def outcome_fn(resp_pair):
-        # Use a fresh temporary verifier to avoid history contamination
-        temp_verifier = SharedDialogueAgent("TempVerifier")
-        temp_verifier.reset()
-        prompt = (
-            f"The problem was:\n{problem}\n"
-            f"An agent gave this solution:\n{resp_pair[0]}\n"
-            f"Is the final answer correct? Answer only YES or NO."
-        )
-        temp_response = temp_verifier.respond(prompt)
-        return 1 if "yes" in temp_response.lower() else 0
+        return outcome_from_responses(resp_pair)
 
     pert_solver = perturbation_attribution(
         solver_resp_clean, verifier_resp_clean, outcome_fn, agent_idx=0, baseline_value=""
