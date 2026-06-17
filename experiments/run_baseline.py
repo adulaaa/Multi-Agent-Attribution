@@ -9,7 +9,7 @@ from src.attribution.perturbation import perturbation_attribution
 from src.attribution.shapley_approx import exact_shapley_2_agents
 
 def main():
-    model_name = "Qwen/Qwen-7B-Chat"  # or use environment variable
+    model_name = os.environ.get("MODEL_NAME", "microsoft/Phi-3.5-mini-instruct")
     agent_a = DialogueAgent("Alice", model_name=model_name)
     agent_b = DialogueAgent("Bob", model_name=model_name)
     env = TwoAgentEnv(agent_a, agent_b)
