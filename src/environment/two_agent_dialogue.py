@@ -5,21 +5,24 @@ class TwoAgentEnv:
     def __init__(self, agent_a: BaseAgent, agent_b: BaseAgent):
         self.agents = [agent_a, agent_b]
         self.history: List[Tuple[str, str, str]] = []
-    
+        self.last_prompt = ""  # <-- ADD THIS
+
     def step(self, prompt: str) -> str:
+        self.last_prompt = prompt  # <-- STORE THE PROMPT
         response_a = self.agents[0].respond(prompt)
         response_b = self.agents[1].respond(response_a)
         self.history.append((prompt, response_a, response_b))
         return response_b
-    
+
     def reset(self):
         for agent in self.agents:
             agent.reset()
         self.history.clear()
-    
+        self.last_prompt = ""  # <-- CLEAR ON RESET
+
     def get_last_exchange(self) -> Optional[Tuple[str, str, str]]:
         return self.history[-1] if self.history else None
-    
+
     def get_outcome(self, metric: str = "length") -> float:
         if not self.history:
             return 0.0
