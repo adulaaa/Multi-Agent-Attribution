@@ -18,8 +18,9 @@ def main():
     env.step(prompt)
     _, resp_a, resp_b = env.get_last_exchange()
 
-    def length_outcome(responses):
-        return len(responses[0]) + len(responses[1])
+    def length_outcome(env):
+        _, ra, rb = env.get_last_exchange()
+        return len(ra) + len(rb)
 
     # 1. Leave-One-Out
     scores_loo = leave_one_out_attribution([agent_a, agent_b], env, length_outcome)
