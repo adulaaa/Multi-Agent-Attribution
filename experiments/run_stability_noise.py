@@ -2,6 +2,8 @@
 """
 Test attribution stability under input noise (reworded prompts).
 Uses a shared model to avoid OOM.
+Stability = 1 - (mean_std_noise / mean_original_score)
+Higher = more stable.
 """
 import os
 import sys
@@ -109,14 +111,22 @@ def main():
             env2 = TwoAgentEnv(agent_a2, agent_b2)
             scores = run_attribution(agent_a2, agent_b2, env2, noisy_prompt, ATTRIB_METHOD)
             perturbed_scores.append(scores)
-        perturbed_scores = np.array(perturbed_scores)
-        variance = np.var(perturbed_scores, axis=0).mean()
-        max_var = np.var(orig_scores) if np.var(orig_scores) > 1e-6 else 1.0
-        stability = 1.0 - min(1.0, variance / max_var)
+        perturbed_scores = np.array(perturbed_scores)  # shape (N_NOISE, 2)
+
+        # Compute mean of original scores (over both agents)
+        mean_orig = np.mean(orig_scores)
+        if mean_orig == 0:
+            stability = 1.0  # if original scores are zero, noise cannot change them
+        else:
+            # Standard deviation across noise samples (mean over agents)
+            std_noise = np.std(perturbed_scores, axis=0).mean()
+            # Coefficient of variation as instability; stability = 1 - relative std
+            stability = 1.0 - min(1.0, std_noise / mean_orig)
         all_stability_scores.append(stability)
-        print(f"Seed {seed}: orig={orig_scores}, stability={stability:.3f}")
+        print(f"Seed {seed}: orig={orig_scores}, stability={stability:.4f}")
+
     overall = np.mean(all_stability_scores)
-    print(f"\nOverall stability score (higher = more stable): {overall:.4f}")
+    print(f"\nOverall stability score (higher = more stable, 1 = perfect): {overall:.4f}")
 
 if __name__ == "__main__":
     main()
