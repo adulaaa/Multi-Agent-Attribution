@@ -2,23 +2,61 @@
 """
 GSM8K math reasoning – two agents: Solver and Verifier.
 Computes LOO, perturbation, and exact Shapley attribution.
+Uses a shared model to avoid OOM.
 """
 import os
 import sys
 import numpy as np
 from datasets import load_dataset
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.append(".")
-from src.agents.dialogue_agent import DialogueAgent
+from src.environment.two_agent_dialogue import TwoAgentEnv
 from src.attribution.removal_based import leave_one_out_attribution
 from src.attribution.perturbation import perturbation_attribution
 from src.attribution.shapley_approx import exact_shapley_2_agents
 
+# --- Load model once ---
+MODEL_NAME = os.environ.get("MODEL_NAME", "microsoft/Phi-3.5-mini-instruct")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Loading {MODEL_NAME} on {DEVICE}...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_NAME,
+    torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+    trust_remote_code=True
+).to(DEVICE)
+model.eval()
 
+# --- Shared agent class (no per‑instance model loading) ---
+class SharedDialogueAgent:
+    def __init__(self, name):
+        self.name = name
+        self.conversation_history = []
+    def respond(self, message, max_new_tokens=100):
+        self.conversation_history.append(("user", message))
+        prompt = f"{self.name}: {message}\n{self.name}:"
+        inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=0.7,
+                pad_token_id=tokenizer.eos_token_id
+            )
+        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        response = response[len(prompt):].strip()
+        self.conversation_history.append(("assistant", response))
+        return response
+    def reset(self):
+        self.conversation_history = []
+
+# --- Helper functions ---
 def get_solver_answer(problem, solver):
     prompt = f"Solve this math problem step by step and output only the final number:\n{problem}"
     return solver.respond(prompt)
-
 
 def get_verifier_text(problem, solver_answer, verifier):
     prompt = (
@@ -28,21 +66,18 @@ def get_verifier_text(problem, solver_answer, verifier):
     )
     return verifier.respond(prompt)
 
-
 def outcome_from_responses(responses):
-    """responses = [solver_text, verifier_text] -> 1 if verifier says YES, else 0."""
     if not responses[1]:
         return 0
     return 1 if "yes" in responses[1].lower() else 0
 
-
 def compute_attributions(problem, solver, verifier):
-    # --- Original outcome (clean run) ---
+    # Original outcome
     solver_resp = get_solver_answer(problem, solver)
     verifier_resp = get_verifier_text(problem, solver_resp, verifier)
     original_correct = outcome_from_responses([solver_resp, verifier_resp])
 
-    # --- LOO for solver ---
+    # LOO for solver
     solver.reset()
     verifier.reset()
     orig_s = solver.respond
@@ -53,11 +88,10 @@ def compute_attributions(problem, solver, verifier):
     solver.respond = orig_s
     loo_solver = original_correct - correct_no_solver
 
-    # --- LOO for verifier ---
+    # LOO for verifier (ablate with empty string)
     solver.reset()
     verifier.reset()
     orig_v = verifier.respond
-    # FIX: ablate verifier with empty string, not "YES"
     verifier.respond = lambda _: ""
     solver_resp2 = get_solver_answer(problem, solver)
     verifier_empty2 = get_verifier_text(problem, solver_resp2, verifier)
@@ -65,16 +99,15 @@ def compute_attributions(problem, solver, verifier):
     verifier.respond = orig_v
     loo_verifier = original_correct - correct_no_verifier
 
-    # --- Fresh clean run for perturbation and Shapley ---
+    # Perturbation and Shapley on clean responses
     solver.reset()
     verifier.reset()
     solver_resp_clean = get_solver_answer(problem, solver)
     verifier_resp_clean = get_verifier_text(problem, solver_resp_clean, verifier)
 
     def outcome_fn(resp_pair):
-        # Re-evaluate correctness using the given solver and verifier texts.
-        # Fresh verifier to avoid history contamination.
-        temp_verifier = DialogueAgent("TempVerifier", model_name=verifier.model_name)
+        # Use a fresh temporary verifier to avoid history contamination
+        temp_verifier = SharedDialogueAgent("TempVerifier")
         temp_verifier.reset()
         prompt = (
             f"The problem was:\n{problem}\n"
@@ -100,20 +133,18 @@ def compute_attributions(problem, solver, verifier):
         "Exact Shapley": (shapley_scores[0], shapley_scores[1])
     }
 
-
 def main():
-    model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
     dataset = load_dataset("gsm8k", "main", split="train")
     indices = list(range(100))
     problems = [dataset[i]["question"] for i in indices]
 
-    loo_s = []; loo_v = []
-    pert_s = []; pert_v = []
-    shap_s = []; shap_v = []
+    loo_s, loo_v = [], []
+    pert_s, pert_v = [], []
+    shap_s, shap_v = [], []
 
     for idx, prob in enumerate(problems):
-        solver = DialogueAgent("Solver", model_name=model_name)
-        verifier = DialogueAgent("Verifier", model_name=model_name)
+        solver = SharedDialogueAgent("Solver")
+        verifier = SharedDialogueAgent("Verifier")
         attrs = compute_attributions(prob, solver, verifier)
         loo_s.append(attrs["LOO"][0]); loo_v.append(attrs["LOO"][1])
         pert_s.append(attrs["Perturbation"][0]); pert_v.append(attrs["Perturbation"][1])
@@ -127,6 +158,6 @@ def main():
     print(f"Perturbation      {np.mean(pert_s):.4f}    {np.mean(pert_v):.4f}")
     print(f"Exact Shapley     {np.mean(shap_s):.4f}    {np.mean(shap_v):.4f}")
 
-
 if __name__ == "__main__":
     main()
+
