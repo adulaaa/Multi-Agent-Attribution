@@ -1,27 +1,16 @@
 #!/usr/bin/env python3
 """
-Test attribution stability under input noise (reworded prompts, paraphrasing, typos).
-
-Measures how much attribution scores (perturbation, Shapley) change when the same
-question is asked in different ways. Outputs variance, rank stability, and a
-stability score (1 - normalized variance). This script is self‑contained and
-recomputes attribution after each noise sample.
-
-Env vars:
-  MODEL_NAME   default Qwen/Qwen2.5-3B-Instruct
-  ATTRIB_METHOD  perturbation | shapley   (default perturbation)
-  N_NOISE       number of noise samples per seed (default 50)
-  SEEDS         number of random seeds (default 10)
-  PROMPT_ORIG   original prompt (default: "Should we increase AI safety funding? Answer in one sentence.")
+Test attribution stability under input noise (reworded prompts).
+Uses a shared model to avoid OOM.
 """
 import os
 import sys
 import random
 import numpy as np
 import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.append(".")
-from src.agents.dialogue_agent import DialogueAgent
 from src.environment.two_agent_dialogue import TwoAgentEnv
 from src.attribution.perturbation import perturbation_attribution
 from src.attribution.shapley_approx import exact_shapley_2_agents
@@ -34,6 +23,36 @@ PROMPT_ORIG = os.environ.get("PROMPT_ORIG", "Should we increase AI safety fundin
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+# --- Load model once globally ---
+print(f"Loading {MODEL_NAME} on {DEVICE}...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_NAME,
+    torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+    trust_remote_code=True
+).to(DEVICE)
+model.eval()
+
+# --- Shared agent class (does NOT load its own model) ---
+class SharedDialogueAgent:
+    def __init__(self, name):
+        self.name = name
+        self.conversation_history = []
+    def respond(self, message, max_new_tokens=100):
+        self.conversation_history.append(("user", message))
+        prompt = f"{self.name}: {message}\n{self.name}:"
+        inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        with torch.no_grad():
+            outputs = model.generate(**inputs, max_new_tokens=max_new_tokens,
+                                     do_sample=True, temperature=0.7,
+                                     pad_token_id=tokenizer.eos_token_id)
+        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        response = response[len(prompt):].strip()
+        self.conversation_history.append(("assistant", response))
+        return response
+    def reset(self):
+        self.conversation_history = []
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -42,7 +61,6 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 def rephrase_prompt(prompt, rng):
-    """Generate a paraphrased version with random synonyms or small typos."""
     variants = [
         prompt.replace("?", "?").lower(),
         prompt.replace("Should", "Is it advisable to"),
@@ -51,7 +69,6 @@ def rephrase_prompt(prompt, rng):
         prompt.replace("Answer in one sentence.", "Respond with one sentence."),
         prompt.replace("?", "? " + rng.choice(["Please", "Kindly", ""])),
     ]
-    # Add random character flip (typo)
     if rng.random() < 0.3 and len(prompt) > 0:
         idx = rng.randint(0, len(prompt)-1)
         noisy = list(prompt)
@@ -60,7 +77,6 @@ def rephrase_prompt(prompt, rng):
     return rng.choice(variants)
 
 def run_attribution(agent_a, agent_b, env, prompt, method):
-    """Run one dialogue and return attribution scores for both agents."""
     env.reset()
     env.step(prompt)
     _, ra, rb = env.get_last_exchange()
@@ -81,18 +97,15 @@ def main():
     for seed in range(SEEDS):
         set_seed(seed)
         rng = random.Random(seed)
-        # Fresh agents each seed
-        agent_a = DialogueAgent("Alice", model_name=MODEL_NAME)
-        agent_b = DialogueAgent("Bob", model_name=MODEL_NAME)
+        agent_a = SharedDialogueAgent("Alice")
+        agent_b = SharedDialogueAgent("Bob")
         env = TwoAgentEnv(agent_a, agent_b)
-        # Original attribution
         orig_scores = run_attribution(agent_a, agent_b, env, PROMPT_ORIG, ATTRIB_METHOD)
-        # Noise samples
         perturbed_scores = []
         for _ in range(N_NOISE):
             noisy_prompt = rephrase_prompt(PROMPT_ORIG, rng)
-            agent_a2 = DialogueAgent("Alice", model_name=MODEL_NAME)
-            agent_b2 = DialogueAgent("Bob", model_name=MODEL_NAME)
+            agent_a2 = SharedDialogueAgent("Alice")
+            agent_b2 = SharedDialogueAgent("Bob")
             env2 = TwoAgentEnv(agent_a2, agent_b2)
             scores = run_attribution(agent_a2, agent_b2, env2, noisy_prompt, ATTRIB_METHOD)
             perturbed_scores.append(scores)
