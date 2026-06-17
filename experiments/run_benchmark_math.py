@@ -57,10 +57,11 @@ def compute_attributions(problem, solver, verifier):
     solver.reset()
     verifier.reset()
     orig_v = verifier.respond
-    verifier.respond = lambda _: "YES"
+    # FIX: ablate verifier with empty string, not "YES"
+    verifier.respond = lambda _: ""
     solver_resp2 = get_solver_answer(problem, solver)
-    verifier_yes = get_verifier_text(problem, solver_resp2, verifier)
-    correct_no_verifier = outcome_from_responses([solver_resp2, verifier_yes])
+    verifier_empty2 = get_verifier_text(problem, solver_resp2, verifier)
+    correct_no_verifier = outcome_from_responses([solver_resp2, verifier_empty2])
     verifier.respond = orig_v
     loo_verifier = original_correct - correct_no_verifier
 
@@ -72,7 +73,7 @@ def compute_attributions(problem, solver, verifier):
 
     def outcome_fn(resp_pair):
         # Re-evaluate correctness using the given solver and verifier texts.
-        #Fresh verifier to avoid history contamination.
+        # Fresh verifier to avoid history contamination.
         temp_verifier = DialogueAgent("TempVerifier", model_name=verifier.model_name)
         temp_verifier.reset()
         prompt = (
