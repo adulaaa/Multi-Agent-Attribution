@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import os
 sys.path.append(".")
 
 from src.agents.dialogue_agent import DialogueAgent
@@ -9,7 +10,7 @@ from src.attribution.perturbation import perturbation_attribution
 from src.attribution.shapley_approx import exact_shapley_2_agents
 
 def main():
-    model_name = "microsoft/Phi-3.5-mini-instruct"
+    model_name = os.environ.get("MODEL_NAME", "microsoft/Phi-3.5-mini-instruct")
     agent_a = DialogueAgent("Alice", model_name=model_name)
     agent_b = DialogueAgent("Bob", model_name=model_name)
     env = TwoAgentEnv(agent_a, agent_b)
@@ -18,17 +19,22 @@ def main():
     env.step(prompt)
     _, resp_a, resp_b = env.get_last_exchange()
 
+    # Outcome function expects 'env' and returns total length
     def length_outcome(env):
         _, ra, rb = env.get_last_exchange()
         return len(ra) + len(rb)
 
-    # 1. Leave-One-Out
+    # LOO (uses length_outcome)
     scores_loo = leave_one_out_attribution([agent_a, agent_b], env, length_outcome)
-    # 2. Perturbation
-    attr_a_pert = perturbation_attribution(resp_a, resp_b, length_outcome, agent_idx=0, baseline_value="")
-    attr_b_pert = perturbation_attribution(resp_a, resp_b, length_outcome, agent_idx=1, baseline_value="")
-    # 3. Exact Shapley (two agents)
-    shapley_scores = exact_shapley_2_agents([resp_a, resp_b], length_outcome, baseline="")
+    
+    # Perturbation and Shapley use the pre-recorded responses with a simple length metric
+    # that takes a list of strings.
+    def length_pair(responses):
+        return len(responses[0]) + len(responses[1])
+
+    attr_a_pert = perturbation_attribution(resp_a, resp_b, length_pair, agent_idx=0, baseline_value="")
+    attr_b_pert = perturbation_attribution(resp_a, resp_b, length_pair, agent_idx=1, baseline_value="")
+    shapley_scores = exact_shapley_2_agents([resp_a, resp_b], length_pair, baseline="")
 
     print(f"\nBaseline attribution results:")
     print(f"Method            Alice      Bob")
