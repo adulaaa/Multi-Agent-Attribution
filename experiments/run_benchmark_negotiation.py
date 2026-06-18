@@ -2,6 +2,7 @@
 """
 Synthetic negotiation attribution – no external dataset.
 Computes LOO, perturbation, and exact Shapley for 100 synthetic negotiations.
+All methods use the actual final price as the outcome.
 """
 import os
 import sys
@@ -16,6 +17,7 @@ from src.attribution.removal_based import leave_one_out_attribution
 from src.attribution.perturbation import perturbation_attribution
 from src.attribution.shapley_approx import exact_shapley_2_agents
 
+# --- Load model once ---
 MODEL_NAME = os.environ.get("MODEL_NAME", "microsoft/Phi-3.5-mini-instruct")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Loading {MODEL_NAME} on {DEVICE}...")
@@ -27,6 +29,7 @@ model = AutoModelForCausalLM.from_pretrained(
 ).to(DEVICE)
 model.eval()
 
+# --- Shared agent class ---
 class SharedDialogueAgent:
     def __init__(self, name):
         self.name = name
@@ -36,9 +39,13 @@ class SharedDialogueAgent:
         prompt = f"{self.name}: {message}\n{self.name}:"
         inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
         with torch.no_grad():
-            outputs = model.generate(**inputs, max_new_tokens=max_new_tokens,
-                                     do_sample=True, temperature=0.7,
-                                     pad_token_id=tokenizer.eos_token_id)
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=0.7,
+                pad_token_id=tokenizer.eos_token_id
+            )
         response = tokenizer.decode(outputs[0], skip_special_tokens=True)
         response = response[len(prompt):].strip()
         self.history.append(("assistant", response))
@@ -46,48 +53,89 @@ class SharedDialogueAgent:
     def reset(self):
         self.history = []
 
-def synthetic_negotiation(buyer, seller):
-    items = ["laptop", "phone", "bicycle", "watch", "headphones", "tablet", "camera", "speaker"]
-    item = random.choice(items)
-    price = random.randint(50, 500)
-    opening = f"Item: {item}\nAsking price: ${price}. Make an offer."
-    buyer_resp = buyer.respond(opening)
-    seller_resp = seller.respond(buyer_resp)
+# --- Run a negotiation and return final price ---
+def run_negotiation(buyer, seller, item="laptop", start_price=100,
+                    fixed_buyer_response=None, fixed_seller_response=None):
+    buyer.reset()
+    seller.reset()
+    opening = f"Item: {item}\nAsking price: ${start_price:.2f}. Make an offer."
+    if fixed_buyer_response is not None:
+        buyer_resp = fixed_buyer_response
+    else:
+        buyer_resp = buyer.respond(opening)
+    if fixed_seller_response is not None:
+        seller_resp = fixed_seller_response
+    else:
+        seller_resp = seller.respond(buyer_resp)
     match = re.search(r"\$?(\d+(?:\.\d{1,2})?)", seller_resp)
     return float(match.group(1)) if match else 0.0
 
+# --- Compute all attributions for one negotiation ---
 def compute_attributions(buyer, seller):
-    orig = synthetic_negotiation(buyer, seller)
-    # LOO
-    orig_b = buyer.respond
-    buyer.respond = lambda _: "I accept."
-    no_buyer = synthetic_negotiation(buyer, seller)
-    buyer.respond = orig_b
-    orig_s = seller.respond
-    seller.respond = lambda _: ""
-    no_seller = synthetic_negotiation(buyer, seller)
-    seller.respond = orig_s
-    loo_b = orig - no_buyer
-    loo_s = orig - no_seller
-    # Perturbation/Shapley
-    buyer.reset(); seller.reset()
-    opening = "Item: laptop\nAsking price: $100. Make an offer."
-    br = buyer.respond(opening)
-    sr = seller.respond(br)
-    def out_fn(r): return synthetic_negotiation(buyer, seller)  # dummy: use actual run with fixed? We'll reuse the run.
-    # Actually we need outcome from the responses; we can re-run with fixed responses.
-    def outcome_pair(resp):
-        # resp = [buyer_text, seller_text] – we need to re-run negotiation with these as fixed
-        # But synthetic_negotiation doesn't accept fixed responses. We'll just use length for demo.
-        return len(resp[0]) + len(resp[1])
-    pert_b = perturbation_attribution(br, sr, outcome_pair, 0, "")
-    pert_s = perturbation_attribution(br, sr, outcome_pair, 1, "")
-    shap = exact_shapley_2_agents([br, sr], outcome_pair, "")
-    return {"LOO":(loo_b, loo_s), "Perturbation":(pert_b, pert_s), "Exact Shapley":(shap[0], shap[1])}
+    # Randomise item and price for each negotiation
+    items = ["laptop", "phone", "bicycle", "watch", "headphones", "tablet", "camera", "speaker"]
+    item = random.choice(items)
+    start_price = random.randint(50, 500)
 
+    # Original price
+    orig_price = run_negotiation(buyer, seller, item, start_price)
+
+    # ---- LOO ----
+    # Ablate buyer
+    orig_buyer_respond = buyer.respond
+    buyer.respond = lambda _: "I accept your price."
+    price_no_buyer = run_negotiation(buyer, seller, item, start_price)
+    buyer.respond = orig_buyer_respond
+    loo_buyer = orig_price - price_no_buyer
+
+    # Ablate seller
+    orig_seller_respond = seller.respond
+    seller.respond = lambda _: ""
+    price_no_seller = run_negotiation(buyer, seller, item, start_price)
+    seller.respond = orig_seller_respond
+    loo_seller = orig_price - price_no_seller
+
+    # ---- Perturbation and Shapley ----
+    # Get fresh responses from both agents
+    buyer.reset()
+    seller.reset()
+    opening = f"Item: {item}\nAsking price: ${start_price:.2f}. Make an offer."
+    buyer_resp = buyer.respond(opening)
+    seller_resp = seller.respond(buyer_resp)
+
+    # Outcome function that re‑runs the negotiation with fixed responses
+    def outcome_fn(resp_pair):
+        # resp_pair = [buyer_text, seller_text]
+        # Re‑run the negotiation with these fixed utterances
+        return run_negotiation(
+            buyer, seller, item, start_price,
+            fixed_buyer_response=resp_pair[0],
+            fixed_seller_response=resp_pair[1]
+        )
+
+    pert_buyer = perturbation_attribution(
+        buyer_resp, seller_resp, outcome_fn, agent_idx=0, baseline_value=""
+    )
+    pert_seller = perturbation_attribution(
+        buyer_resp, seller_resp, outcome_fn, agent_idx=1, baseline_value=""
+    )
+    shapley_scores = exact_shapley_2_agents(
+        [buyer_resp, seller_resp], outcome_fn, baseline=""
+    )
+
+    return {
+        "LOO": (loo_buyer, loo_seller),
+        "Perturbation": (pert_buyer, pert_seller),
+        "Exact Shapley": (shapley_scores[0], shapley_scores[1])
+    }
+
+# --- Main loop ---
 def main():
     n = 100
-    loo_b, loo_s, pert_b, pert_s, shap_b, shap_s = [], [], [], [], [], []
+    loo_b, loo_s = [], []
+    pert_b, pert_s = [], []
+    shap_b, shap_s = [], []
+
     for i in range(n):
         buyer = SharedDialogueAgent("Buyer")
         seller = SharedDialogueAgent("Seller")
@@ -97,7 +145,8 @@ def main():
         shap_b.append(attrs["Exact Shapley"][0]); shap_s.append(attrs["Exact Shapley"][1])
         if (i+1) % 20 == 0:
             print(f"Processed {i+1} negotiations.")
-    print("\n=== Negotiation Attribution Summary (100) ===")
+
+    print("\n=== Negotiation Attribution Summary (100 negotiations) ===")
     print(f"Method            Buyer      Seller")
     print(f"LOO               {np.mean(loo_b):.4f}    {np.mean(loo_s):.4f}")
     print(f"Perturbation      {np.mean(pert_b):.4f}    {np.mean(pert_s):.4f}")
