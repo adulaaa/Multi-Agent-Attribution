@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Craigslist Bargaining – negotiation attribution.
+Negotiation attribution – uses facebook/negotiation dataset.
 Uses a shared model to avoid OOM.
 Computes LOO, perturbation, and exact Shapley for 100 negotiations.
 """
@@ -112,7 +112,8 @@ def compute_attributions(item_title, item_desc, start_price, buyer, seller):
     }
 
 def main():
-    dataset = load_dataset("craigslist_bargaining", split="train")
+    # Use the accessible negotiation dataset
+    dataset = load_dataset("facebook/negotiation", split="train")
     examples = [dataset[i] for i in range(100)]
 
     all_loo_b, all_loo_s = [], []
@@ -120,9 +121,12 @@ def main():
     all_shap_b, all_shap_s = [], []
 
     for idx, ex in enumerate(examples):
-        title = ex.get("title", "item")
-        desc = ex.get("description", "")
-        price = float(ex.get("price", 100.0))
+        # Extract dialogue as description; set default title and price
+        dialogue = ex.get("dialogue", "")
+        title = "Negotiation item"
+        desc = dialogue[:500] if dialogue else ""
+        price = 100.0  # default starting price
+
         buyer = SharedDialogueAgent("Buyer")
         seller = SharedDialogueAgent("Seller")
         attrs = compute_attributions(title, desc, price, buyer, seller)
@@ -132,7 +136,7 @@ def main():
         if (idx+1) % 20 == 0:
             print(f"Processed {idx+1} negotiations.")
 
-    print("\n=== Craigslist Attribution Summary (100 negotiations) ===")
+    print("\n=== Negotiation Attribution Summary (100 negotiations) ===")
     print(f"Method            Buyer      Seller")
     print(f"LOO               {np.mean(all_loo_b):.4f}    {np.mean(all_loo_s):.4f}")
     print(f"Perturbation      {np.mean(all_pert_b):.4f}    {np.mean(all_pert_s):.4f}")
