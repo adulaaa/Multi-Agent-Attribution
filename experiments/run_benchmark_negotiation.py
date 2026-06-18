@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Negotiation attribution – uses deal_or_no_dialog dataset.
+Negotiation attribution – uses daily_dialog dataset.
 Uses a shared model to avoid OOM.
 Computes LOO, perturbation, and exact Shapley for 100 negotiations.
 """
@@ -112,8 +112,8 @@ def compute_attributions(item_title, item_desc, start_price, buyer, seller):
     }
 
 def main():
-    # ✅ CORRECT DATASET – exists on Hugging Face
-    dataset = load_dataset("deal_or_no_dialog", split="train")
+    # Use the stable daily_dialog dataset
+    dataset = load_dataset("daily_dialog", split="train")
     examples = [dataset[i] for i in range(min(100, len(dataset)))]
 
     all_loo_b, all_loo_s = [], []
@@ -121,12 +121,10 @@ def main():
     all_shap_b, all_shap_s = [], []
 
     for idx, ex in enumerate(examples):
-        # deal_or_no_dialog has 'dialogue' field with conversation
-        dialogue = ex.get("dialogue", "")
-        # Extract first few lines as description
-        lines = dialogue.split("\n") if dialogue else []
-        desc = "\n".join(lines[:3]) if lines else ""
-        title = "Negotiation item"
+        # daily_dialog has 'dialog' field (list of utterances)
+        dialog = ex.get("dialog", [])
+        desc = " ".join(dialog[:5]) if dialog else ""
+        title = "Daily conversation"
         price = 100.0  # default starting price
 
         buyer = SharedDialogueAgent("Buyer")
