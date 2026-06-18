@@ -23,7 +23,7 @@ import torch
 from src.agents.white_box_agent import WhiteBoxAgent, load_shared_model
 from src.attribution.tracin import per_example_param_grad, tracin_matrices
 
-MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen3-1.7B")
+MODEL_ID = os.environ.get("MODEL_ID", "microsoft/Phi-3.5-mini-instruct")
 DTYPE = os.environ.get("DTYPE", "float32")
 ATTR_SUBSET = os.environ.get("ATTR_SUBSET", "lm_head")
 N_TURNS = int(os.environ.get("N_TURNS", "4"))
