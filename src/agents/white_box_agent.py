@@ -19,7 +19,7 @@ def load_shared_model(model_name, dtype="float32", device=None):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     tok = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, dtype=_DTYPES[dtype]).to(device).eval()
+        model_name, torch_dtype=_DTYPES[dtype]).to(device).eval()
     return tok, model, device
 
 
