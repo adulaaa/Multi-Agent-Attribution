@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-GSM8K math reasoning – two agents: Solver and Verifier.
-Computes LOO, perturbation, and exact Shapley attribution.
-Uses a shared model to avoid OOM.
+GSM8K math reasoning with stats and smart baseline.
 """
 import os
 import sys
@@ -10,6 +8,7 @@ import numpy as np
 from datasets import load_dataset
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from scipy import stats
 
 sys.path.append(".")
 from src.environment.two_agent_dialogue import TwoAgentEnv
@@ -17,7 +16,6 @@ from src.attribution.removal_based import leave_one_out_attribution
 from src.attribution.perturbation import perturbation_attribution
 from src.attribution.shapley_approx import exact_shapley_2_agents
 
-# --- Load model once ---
 MODEL_NAME = os.environ.get("MODEL_NAME", "microsoft/Phi-3.5-mini-instruct")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Loading {MODEL_NAME} on {DEVICE}...")
@@ -29,7 +27,6 @@ model = AutoModelForCausalLM.from_pretrained(
 ).to(DEVICE)
 model.eval()
 
-# --- Shared agent class ---
 class SharedDialogueAgent:
     def __init__(self, name):
         self.name = name
@@ -53,7 +50,6 @@ class SharedDialogueAgent:
     def reset(self):
         self.conversation_history = []
 
-# --- Helper functions ---
 def get_solver_answer(problem, solver):
     prompt = f"Solve this math problem step by step and output only the final number:\n{problem}"
     return solver.respond(prompt)
@@ -67,18 +63,18 @@ def get_verifier_text(problem, solver_answer, verifier):
     return verifier.respond(prompt)
 
 def outcome_from_responses(responses):
-    # Directly use the Verifier's text
     if not responses[1]:
         return 0
     return 1 if "yes" in responses[1].lower() else 0
 
+BASELINE = "I don't know the answer."
+
 def compute_attributions(problem, solver, verifier):
-    # Original outcome
     solver_resp = get_solver_answer(problem, solver)
     verifier_resp = get_verifier_text(problem, solver_resp, verifier)
     original_correct = outcome_from_responses([solver_resp, verifier_resp])
 
-    # LOO for solver
+    # LOO solver
     solver.reset()
     verifier.reset()
     orig_s = solver.respond
@@ -89,7 +85,7 @@ def compute_attributions(problem, solver, verifier):
     solver.respond = orig_s
     loo_solver = original_correct - correct_no_solver
 
-    # LOO for verifier
+    # LOO verifier
     solver.reset()
     verifier.reset()
     orig_v = verifier.respond
@@ -100,24 +96,23 @@ def compute_attributions(problem, solver, verifier):
     verifier.respond = orig_v
     loo_verifier = original_correct - correct_no_verifier
 
-    # Perturbation and Shapley: use the actual recorded responses
+    # Perturbation and Shapley with smart baseline
     solver.reset()
     verifier.reset()
     solver_resp_clean = get_solver_answer(problem, solver)
     verifier_resp_clean = get_verifier_text(problem, solver_resp_clean, verifier)
 
-    # Outcome function uses the Verifier's actual text (no fresh verifier)
     def outcome_fn(resp_pair):
         return outcome_from_responses(resp_pair)
 
     pert_solver = perturbation_attribution(
-        solver_resp_clean, verifier_resp_clean, outcome_fn, agent_idx=0, baseline_value=""
+        solver_resp_clean, verifier_resp_clean, outcome_fn, agent_idx=0, baseline_value=BASELINE
     )
     pert_verifier = perturbation_attribution(
-        solver_resp_clean, verifier_resp_clean, outcome_fn, agent_idx=1, baseline_value=""
+        solver_resp_clean, verifier_resp_clean, outcome_fn, agent_idx=1, baseline_value=BASELINE
     )
     shapley_scores = exact_shapley_2_agents(
-        [solver_resp_clean, verifier_resp_clean], outcome_fn, baseline=""
+        [solver_resp_clean, verifier_resp_clean], outcome_fn, baseline=BASELINE
     )
 
     return {
@@ -125,6 +120,13 @@ def compute_attributions(problem, solver, verifier):
         "Perturbation": (pert_solver, pert_verifier),
         "Exact Shapley": (shapley_scores[0], shapley_scores[1])
     }
+
+def compute_ci(data):
+    n = len(data)
+    mean = np.mean(data)
+    std_err = stats.sem(data)
+    ci = stats.t.interval(0.95, n-1, loc=mean, scale=std_err)
+    return mean, std_err, ci
 
 def main():
     dataset = load_dataset("gsm8k", "main", split="train")
@@ -145,11 +147,18 @@ def main():
         if (idx+1) % 20 == 0:
             print(f"Processed {idx+1} problems.")
 
+    methods = {
+        "LOO": (loo_s, loo_v),
+        "Perturbation": (pert_s, pert_v),
+        "Exact Shapley": (shap_s, shap_v)
+    }
+
     print("\n=== GSM8K Attribution Summary (100 problems) ===")
-    print(f"Method            Solver     Verifier")
-    print(f"LOO               {np.mean(loo_s):.4f}    {np.mean(loo_v):.4f}")
-    print(f"Perturbation      {np.mean(pert_s):.4f}    {np.mean(pert_v):.4f}")
-    print(f"Exact Shapley     {np.mean(shap_s):.4f}    {np.mean(shap_v):.4f}")
+    print(f"{'Method':<15} {'Solver mean':>12} {'Solver CI':>20} {'Verifier mean':>12} {'Verifier CI':>20}")
+    for name, (s_list, v_list) in methods.items():
+        s_mean, s_se, s_ci = compute_ci(s_list)
+        v_mean, v_se, v_ci = compute_ci(v_list)
+        print(f"{name:<15} {s_mean:12.4f} [{s_ci[0]:.4f}, {s_ci[1]:.4f}] {v_mean:12.4f} [{v_ci[0]:.4f}, {v_ci[1]:.4f}]")
 
 if __name__ == "__main__":
     main()
