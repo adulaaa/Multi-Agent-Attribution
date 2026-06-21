@@ -18,7 +18,8 @@ def shapley_approximation(responses: List[str], outcome_fn: Callable[[List[str]]
             current_outcome = new_outcome
     return shapley_values
 
-def data_shapley_style_attribution(agents: List, outcome_fn: Callable, n_samples: int = 100) -> np.ndarray:
+def data_shapley_style_attribution(agents: List, outcome_fn: Callable, 
+                                   n_samples: int = 100, baseline: str = "") -> np.ndarray:
     n = len(agents)
     shapley = np.zeros(n)
     for _ in range(n_samples):
