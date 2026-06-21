@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Synthetic negotiation attribution – no external dataset.
+Synthetic negotiation attribution with stats – no external dataset.
 Computes LOO, perturbation, and exact Shapley for 100 synthetic negotiations.
 All methods use the same baseline (empty string) and the same sampled response pair.
 All attributions are computed with respect to the same reference outcome.
 """
+
 import os
 import sys
 import re
@@ -12,8 +13,8 @@ import random
 import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from scipy import stats
 
-# --- Set seeds for reproducibility ---
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -23,7 +24,6 @@ def set_seed(seed=42):
 
 set_seed(42)
 
-# --- Load model once ---
 MODEL_NAME = os.environ.get("MODEL_NAME", "microsoft/Phi-3.5-mini-instruct")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Loading {MODEL_NAME} on {DEVICE}...")
@@ -35,7 +35,6 @@ model = AutoModelForCausalLM.from_pretrained(
 ).to(DEVICE)
 model.eval()
 
-# --- Helper: generate response from model with chat template ---
 def generate_response(prompt, max_new_tokens=100):
     messages = [{"role": "user", "content": prompt}]
     input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -49,14 +48,12 @@ def generate_response(prompt, max_new_tokens=100):
             pad_token_id=tokenizer.eos_token_id
         )
     full = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    # Extract assistant's response (after the last turn)
     if "assistant" in full:
         response = full.split("assistant")[-1].strip()
     else:
         response = full[len(input_text):].strip()
     return response
 
-# --- Shared agent class ---
 class SharedDialogueAgent:
     def __init__(self, name):
         self.name = name
@@ -70,8 +67,6 @@ class SharedDialogueAgent:
     def reset(self):
         self.history = []
 
-# --- Run a negotiation and return final price ---
-# fixed utterances are used if provided; otherwise they are generated.
 def run_negotiation(buyer, seller, item, start_price,
                     fixed_buyer_response=None, fixed_seller_response=None):
     buyer.reset()
@@ -89,17 +84,16 @@ def run_negotiation(buyer, seller, item, start_price,
         seller.history.append(("assistant", seller_resp))
     else:
         seller_resp = seller.respond(buyer_resp)
-    # Extract price – fallback to start_price if not found
     match = re.search(r"\$?(\d+(?:\.\d{1,2})?)", seller_resp)
     if match:
         return float(match.group(1))
     else:
         return start_price
 
-# --- Outcome function for attribution (deterministic given pair) ---
+BASELINE = "I don't know."
+
 def make_outcome_fn(buyer, seller, item, start_price):
     def outcome_fn(resp_pair):
-        # resp_pair = [buyer_text, seller_text]
         return run_negotiation(
             buyer, seller, item, start_price,
             fixed_buyer_response=resp_pair[0],
@@ -107,20 +101,13 @@ def make_outcome_fn(buyer, seller, item, start_price):
         )
     return outcome_fn
 
-# --- Attribution methods – all use the SAME baseline (empty string) ---
-BASELINE = ""   # common baseline for both agents
-
 def leave_one_out_attribution(resp_pair, outcome_fn):
-    # resp_pair = [buyer_text, seller_text]
     full = outcome_fn(resp_pair)
-    # LOO buyer: replace buyer's utterance with baseline
     loo_b = full - outcome_fn([BASELINE, resp_pair[1]])
-    # LOO seller: replace seller's utterance with baseline
     loo_s = full - outcome_fn([resp_pair[0], BASELINE])
     return loo_b, loo_s
 
 def perturbation_attribution(resp_pair, outcome_fn, agent_idx):
-    # agent_idx: 0 for buyer, 1 for seller
     full = outcome_fn(resp_pair)
     if agent_idx == 0:
         alt = outcome_fn([BASELINE, resp_pair[1]])
@@ -130,7 +117,6 @@ def perturbation_attribution(resp_pair, outcome_fn, agent_idx):
 
 def exact_shapley_2_agents(resp_pair, outcome_fn):
     b, s = resp_pair[0], resp_pair[1]
-    # Empty coalition: both replaced by baseline
     v_empty = outcome_fn([BASELINE, BASELINE])
     v_b = outcome_fn([b, BASELINE])
     v_s = outcome_fn([BASELINE, s])
@@ -139,7 +125,13 @@ def exact_shapley_2_agents(resp_pair, outcome_fn):
     shap_s = 0.5*(v_s - v_empty) + 0.5*(v_bs - v_b)
     return shap_b, shap_s
 
-# --- Main loop ---
+def compute_ci(data):
+    n = len(data)
+    mean = np.mean(data)
+    std_err = stats.sem(data)
+    ci = stats.t.interval(0.95, n-1, loc=mean, scale=std_err)
+    return mean, std_err, ci
+
 def main():
     n = 100
     loo_b_list, loo_s_list = [], []
@@ -153,17 +145,14 @@ def main():
         item = random.choice(items)
         start_price = random.randint(50, 500)
 
-        # Generate ONE representative pair of responses (both utterances)
         buyer.reset(); seller.reset()
         opening = f"Item: {item}\nAsking price: ${start_price:.2f}. Make an offer."
         buyer_resp = buyer.respond(opening)
         seller_resp = seller.respond(buyer_resp)
         resp_pair = [buyer_resp, seller_resp]
 
-        # Deterministic outcome function
         outcome_fn = make_outcome_fn(buyer, seller, item, start_price)
 
-        # ---- Compute all attributions using the SAME baseline and SAME pair ----
         loo_b, loo_s = leave_one_out_attribution(resp_pair, outcome_fn)
         pert_b = perturbation_attribution(resp_pair, outcome_fn, agent_idx=0)
         pert_s = perturbation_attribution(resp_pair, outcome_fn, agent_idx=1)
@@ -176,11 +165,20 @@ def main():
         if (i+1) % 20 == 0:
             print(f"Processed {i+1} negotiations.")
 
-    print("\n=== Negotiation Attribution Summary (100 negotiations) ===")
-    print(f"Method            Buyer      Seller")
-    print(f"LOO               {np.mean(loo_b_list):.4f}    {np.mean(loo_s_list):.4f}")
-    print(f"Perturbation      {np.mean(pert_b_list):.4f}    {np.mean(pert_s_list):.4f}")
-    print(f"Exact Shapley     {np.mean(shap_b_list):.4f}    {np.mean(shap_s_list):.4f}")
+    methods = {
+        "LOO": (loo_b_list, loo_s_list),
+        "Perturbation": (pert_b_list, pert_s_list),
+        "Exact Shapley": (shap_b_list, shap_s_list)
+    }
 
+    print("\n=== Negotiation Attribution Summary (100 negotiations) ===")
+    print(f"{'Method':<15} {'Buyer mean':>12} {'Buyer CI':>20} {'Seller mean':>12} {'Seller CI':>20}")
+    for name, (b_list, s_list) in methods.items():
+        b_mean, b_se, b_ci = compute_ci(b_list)
+        s_mean, s_se, s_ci = compute_ci(s_list)
+        print(f"{name:<15} {b_mean:12.4f} [{b_ci[0]:.4f}, {b_ci[1]:.4f}] {s_mean:12.4f} [{s_ci[0]:.4f}, {s_ci[1]:.4f}]")
+
+if __name__ == "__main__":
+    main()
 if __name__ == "__main__":
     main()
