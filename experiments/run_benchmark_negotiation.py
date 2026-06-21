@@ -177,8 +177,6 @@ def main():
         b_mean, b_se, b_ci = compute_ci(b_list)
         s_mean, s_se, s_ci = compute_ci(s_list)
         print(f"{name:<15} {b_mean:12.4f} [{b_ci[0]:.4f}, {b_ci[1]:.4f}] {s_mean:12.4f} [{s_ci[0]:.4f}, {s_ci[1]:.4f}]")
-
-if __name__ == "__main__":
-    main()
+        
 if __name__ == "__main__":
     main()
