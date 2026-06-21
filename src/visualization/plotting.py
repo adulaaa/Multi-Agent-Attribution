@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 
-def bar_plot_attributions(method_names, scores, ylabel="Attribution Score", title=None):
+def bar_plot_attributions(method_names, scores, ylabel="Attribution Score", title=None, save_path=None):
     fig, ax = plt.subplots(figsize=(8,5))
     x = np.arange(len(method_names))
     ax.bar(x, scores)
@@ -12,12 +12,16 @@ def bar_plot_attributions(method_names, scores, ylabel="Attribution Score", titl
     if title:
         ax.set_title(title)
     plt.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
     return fig
 
-def heatmap(matrix, labels, title="Influence Heatmap", cmap="coolwarm"):
+def heatmap(matrix, labels, title="Influence Heatmap", cmap="coolwarm", save_path=None):
     fig, ax = plt.subplots(figsize=(8,6))
     sns.heatmap(matrix, annot=True, fmt=".3f", xticklabels=labels, yticklabels=labels,
                 cmap=cmap, vmin=-1, vmax=1, ax=ax)
     ax.set_title(title)
     plt.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
     return fig
